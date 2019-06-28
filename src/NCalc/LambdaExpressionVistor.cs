@@ -169,10 +169,8 @@ namespace NCalc
                     _result = L.Expression.GreaterThanOrEqual(r, L.Expression.Constant(0));
                     break;
                 default:
-                    var mi = _context.Type.GetTypeInfo().DeclaredMethods.FirstOrDefault(
-                        m => m.Name.Equals(function.Identifier.Name, StringComparison.OrdinalIgnoreCase) &&
-                             m.IsPublic && !m.IsStatic);
-                    _result = L.Expression.Call(_context, mi, args);
+                    var mi = FindMethod(function.Identifier.Name, args);
+                    _result = L.Expression.Call(_context, mi.BaseMethodInfo, mi.PreparedArguments);
                     break;
             }
         }
@@ -189,11 +187,90 @@ namespace NCalc
             }
         }
 
+        private ExtendedMethodInfo FindMethod(string methodName, L.Expression[] methodArgs) 
+        {
+            var methods = _context.Type.GetTypeInfo().DeclaredMethods.Where(m => m.Name.Equals(methodName, StringComparison.OrdinalIgnoreCase) && m.IsPublic && !m.IsStatic);
+            foreach (var potentialMethod in methods) 
+            {
+                var methodParams = potentialMethod.GetParameters();
+                var newArguments = PrepareMethodArgumentsIfValid(methodParams, methodArgs);
+
+                if (newArguments != null) 
+                {
+                    return new ExtendedMethodInfo() { BaseMethodInfo = potentialMethod, PreparedArguments = newArguments };
+                }
+            }
+
+            throw new MissingMethodException($"method not found: {methodName}");
+        }
+
+        private L.Expression[] PrepareMethodArgumentsIfValid(ParameterInfo[] parameters, L.Expression[] arguments) 
+        {
+            if (!parameters.Any() && !arguments.Any()) return arguments;
+            if (!parameters.Any()) return null;
+            bool paramsMatchArguments = true;
+
+            var lastParameter = parameters.Last();
+            bool hasParamsKeyword = lastParameter.IsDefined(typeof(ParamArrayAttribute));
+            if (hasParamsKeyword && parameters.Length > arguments.Length) return null;
+            L.Expression[] newArguments = new L.Expression[parameters.Length];
+            L.Expression[] paramsKeywordArgument = null;
+            Type paramsElementType = null;
+            int paramsParameterPosition = 0;
+            if (!hasParamsKeyword) 
+            {
+                paramsMatchArguments &= parameters.Length == arguments.Length;
+                if (!paramsMatchArguments) return null;
+            } 
+            else 
+            {
+                paramsParameterPosition = lastParameter.Position;
+                paramsElementType = lastParameter.ParameterType.GetElementType();
+                paramsKeywordArgument = new L.Expression[arguments.Length - parameters.Length + 1];
+            }
+            
+            for (int i = 0; i < arguments.Length; i++) 
+            {
+                var isParamsElement = hasParamsKeyword && i >= paramsParameterPosition;
+                var argumentType = arguments[i].Type;
+                var parameterType = isParamsElement ? paramsElementType : parameters[i].ParameterType;
+                paramsMatchArguments &= argumentType == parameterType;
+                if (!paramsMatchArguments) return null;
+                if (!isParamsElement) 
+                {
+                    newArguments[i] = arguments[i];
+                } 
+                else 
+                {
+                    paramsKeywordArgument[i - paramsParameterPosition] = arguments[i];
+                }
+            }
+
+            if (hasParamsKeyword) 
+            {
+                newArguments[paramsParameterPosition] = L.Expression.NewArrayInit(paramsElementType, paramsKeywordArgument);
+            }
+            return newArguments;
+        }
+
         private L.Expression WithCommonNumericType(L.Expression left, L.Expression right,
             Func<L.Expression, L.Expression, L.Expression> action, BinaryExpressionType expressiontype = BinaryExpressionType.Unknown)
         {
             left = UnwrapNullable(left);
             right = UnwrapNullable(right);
+
+            if (_options.HasFlag(EvaluateOptions.BooleanCalculation))
+            {
+                if (left.Type == typeof(bool))
+                {
+                    left = L.Expression.Condition(left, L.Expression.Constant(1.0), L.Expression.Constant(0.0));
+                }
+
+                if (right.Type == typeof(bool))
+                {
+                    right = L.Expression.Condition(right, L.Expression.Constant(1.0), L.Expression.Constant(0.0));
+                }
+            }
 
             var precedence = new[]
             {
